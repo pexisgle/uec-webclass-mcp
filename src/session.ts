@@ -14,6 +14,7 @@ import type {
   Timetable,
 } from "./model.ts";
 import * as v from "valibot";
+import { Mutex } from "./mutex.ts";
 
 const sessionLogger = rootLogger.getChild("session");
 const { browser, close } = await launchBrowser();
@@ -27,8 +28,9 @@ page.on("load", () => {
 const secret = new URL(env().UEC_TOTP_URL).searchParams.get("secret") as string;
 
 class Session {
+  private mutex = new Mutex();
   constructor() {}
-  async login(): Promise<void> {
+  private async login(): Promise<void> {
     sessionLogger.info`Logging in to WebClass...`;
 
     const homeUrl = "https://webclass.cdel.uec.ac.jp/webclass/";
@@ -79,6 +81,7 @@ class Session {
   }
 
   async whoami(): Promise<{ name: string; emails: string[] }> {
+    using _lock = await this.mutex.lock();
     await this.login();
 
     sessionLogger.info`Fetching user information...`;
@@ -94,6 +97,7 @@ class Session {
   async getTimetable(
     target: { year: string; semester: string } | undefined = undefined,
   ): Promise<Timetable> {
+    using _lock = await this.mutex.lock();
     await this.login();
 
     sessionLogger.info`Fetching timetable...`;
@@ -220,6 +224,7 @@ class Session {
   }
 
   async getCourse(courseId: string): Promise<Course> {
+    using _lock = await this.mutex.lock();
     await this.login();
 
     sessionLogger.info`Fetching course information for course ID: ${courseId}...`;
