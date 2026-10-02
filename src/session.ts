@@ -109,7 +109,8 @@ class Session {
     await page.waitForURL(
       (url) =>
         loginActionUrls.some((actionUrl) => isTargetUrl(url.href, actionUrl)) ||
-        isTargetUrl(url.href, homeUrl),
+        isTargetUrl(url.href, homeUrl) ||
+        isTargetUrl(url.href, url.href),
       { timeout: 10000 },
     );
     if (!isTargetUrl(page.url(), homeUrl)) {
