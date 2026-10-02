@@ -3,6 +3,16 @@ import { env } from "./env.ts";
 import { TOTP } from "totp-generator";
 import { UnreachableError } from "./utils.ts";
 import { rootLogger } from "./log.ts";
+import type {
+  TimetableTargetOption,
+  Course,
+  CourseTimelineEntry,
+  CourseSection,
+  CourseContent,
+  TimetableTimedCourse,
+  TimetableUntimedCourses,
+  Timetable,
+} from "./model.ts";
 import * as v from "valibot";
 
 const sessionLogger = rootLogger.getChild("session");
@@ -16,26 +26,6 @@ page.on("load", () => {
 });
 const secret = new URL(env().UEC_TOTP_URL).searchParams.get("secret") as string;
 
-export const courseSchema = v.object({
-  weekday: v.string(),
-  period: v.string(),
-  name: v.string(),
-  id: v.string(),
-});
-export const timetableTargetOptionSchema = v.object({
-  name: v.string(),
-  id: v.string(),
-});
-export const timetableSchema = v.object({
-  availableYears: v.array(timetableTargetOptionSchema),
-  availableSemesters: v.array(timetableTargetOptionSchema),
-  currentYear: v.string(),
-  currentSemester: v.string(),
-  courses: v.array(courseSchema),
-});
-export type Course = v.InferOutput<typeof courseSchema>;
-export type TimetableTargetOption = v.InferOutput<typeof timetableTargetOptionSchema>;
-export type Timetable = v.InferOutput<typeof timetableSchema>;
 class Session {
   constructor() {}
   async login(): Promise<void> {
@@ -101,13 +91,9 @@ class Session {
     return { name: name ?? "", emails };
   }
 
-  async getTimetable(target: { year: string; semester: string } | undefined = undefined): Promise<{
-    availableYears: TimetableTargetOption[];
-    availableSemesters: TimetableTargetOption[];
-    currentYear: string;
-    currentSemester: string;
-    courses: Course[];
-  }> {
+  async getTimetable(
+    target: { year: string; semester: string } | undefined = undefined,
+  ): Promise<Timetable> {
     await this.login();
 
     sessionLogger.info`Fetching timetable...`;
@@ -143,31 +129,39 @@ class Session {
       .locator('select[name="semester"] > option[selected]')
       .getAttribute("value");
 
-    let courses: Course[] = [];
+    let timedCourses: TimetableTimedCourse[] = [];
+    let untimedCourses: TimetableUntimedCourses[] = [];
     if ((await page.locator("#schedule-table").count()) === 0) {
-      sessionLogger.warning`No courses registered in the timetable.`;
+      sessionLogger.warning`No timed courses found.`;
     } else {
       sessionLogger.info`Parsing courses from the timetable...`;
       const weekdayRow = await page.locator("#schedule-table > thead > tr > th").allTextContents();
       if (weekdayRow.length === 0) {
         throw new Error("Failed to parse weekday row from the timetable.");
       }
-      courses = await page
+      timedCourses = await page
         .locator("#schedule-table > tbody > tr")
         .evaluateAll((rows, weekdayRow) => {
           return rows.flatMap((row) => {
             const cells = Array.from(row.querySelectorAll("td"));
             const period = cells[0].textContent?.trim() ?? "";
-            const courses: Course[] = [];
+            const courses: TimetableTimedCourse[] = [];
             for (const [index, cell] of cells.entries()) {
               const link = cell.querySelector("a");
               if (link) {
-                const id = link.getAttribute("href")?.match(/course.php\/([0-9]+)/)?.[1] ?? "";
+                const url = new URL(
+                  link.getAttribute("href") ?? "",
+                  "https://webclass.cdel.uec.ac.jp/webclass/",
+                ).href;
+                const id = url.match(/course.php\/([^/]+)/)?.[1] ?? "";
                 courses.push({
-                  id,
                   weekday: weekdayRow[index],
                   period,
-                  name: link.textContent?.trim() ?? "",
+                  course: {
+                    id,
+                    name: (link.textContent?.trim() ?? "").replace("» ", ""),
+                    url,
+                  },
                 });
               }
             }
@@ -177,12 +171,146 @@ class Session {
         }, weekdayRow);
     }
 
+    untimedCourses = await page
+      .locator(".courseTree.courseLevelOne")
+      .evaluateAll((items): TimetableUntimedCourses[] =>
+        items.map((item) => {
+          const category = item.querySelector(".courseTree-levelTitle")?.textContent?.trim() ?? "";
+          const subCategories = Array.from(item.querySelectorAll(".courseTree.courseLevelTwo")).map(
+            (subItem): TimetableUntimedCourses["courses"][number] => {
+              const subCategory = subItem.querySelector(".title h5")?.textContent?.trim() ?? "";
+              const courses = Array.from(subItem.querySelectorAll(".course-title")).map(
+                (courseItem): TimetableUntimedCourses["courses"][number]["courses"][number] => {
+                  const link = courseItem.querySelector("a");
+                  const url = new URL(
+                    link?.getAttribute("href") ?? "",
+                    "https://webclass.cdel.uec.ac.jp/webclass/",
+                  ).href;
+                  const id = url.match(/course.php\/([^/]+)/)?.[1] ?? "";
+                  return {
+                    id,
+                    name: link?.textContent?.trim() ?? "",
+                    url,
+                  };
+                },
+              );
+
+              return {
+                subCategory,
+                courses,
+              };
+            },
+          );
+
+          return {
+            category,
+            courses: subCategories,
+          };
+        }),
+      );
+
     return {
       availableYears,
       availableSemesters,
       currentYear: currentYear ?? "",
       currentSemester: currentSemester ?? "",
-      courses: courses,
+      timedCourses,
+      untimedCourses,
+    };
+  }
+
+  async getCourse(courseId: string): Promise<Course> {
+    await this.login();
+
+    sessionLogger.info`Fetching course information for course ID: ${courseId}...`;
+    await page.goto(`https://webclass.cdel.uec.ac.jp/webclass/course.php/${courseId}/`);
+
+    const rawTimeline = await page.evaluate(async (courseId) => {
+      return await fetch(
+        `https://webclass.cdel.uec.ac.jp/webclass/course.php/${courseId}/api/timeline/messages?head=1`,
+      ).then((res) => res.json());
+    }, courseId);
+    const rawTimelineSchema = v.object({
+      records: v.array(
+        v.object({
+          message: v.string(),
+          realname: v.string(),
+          datetime: v.number(),
+        }),
+      ),
+    });
+    const parsedTimeline = v.parse(rawTimelineSchema, rawTimeline);
+    const timeline = parsedTimeline.records.map((record): CourseTimelineEntry => ({
+      content: record.message,
+      author: record.realname,
+      datetime: new Date(record.datetime * 1000).toISOString(),
+    }));
+
+    const sections = await page
+      .locator(".cl-contentsList_folder")
+      .evaluateAll((folders): CourseSection[] => {
+        return folders.map((folder) => {
+          const title = folder.querySelector(".panel-title")?.textContent?.trim() ?? "";
+          const contents = Array.from(
+            folder.querySelectorAll(".cl-contentsList_listGroupItem"),
+          ).map((item): CourseContent => {
+            const title =
+              item.querySelector(".cm-contentsList_contentName")?.textContent?.trim() ?? "";
+            const kind =
+              item.querySelector(".cl-contentsList_categoryLabel")?.textContent?.trim() ?? "";
+            let availableDuring: string | undefined = undefined;
+            let url: string = "";
+            let numUsed: number | undefined = undefined;
+
+            for (const child of item.querySelectorAll(".cm-contentsList_contentDetailListItem")) {
+              const label = child
+                .querySelector(".cm-contentsList_contentDetailListItemLabel")
+                ?.textContent?.trim();
+              const data = child
+                .querySelector(".cm-contentsList_contentDetailListItemData")
+                ?.textContent?.trim();
+              if (label === "利用可能期間") {
+                availableDuring = data ?? undefined;
+              }
+            }
+            for (const child of item.querySelectorAll(".cl-contentsList_contentDetailListItem")) {
+              const label = child
+                .querySelector(".cl-contentsList_contentDetailListItemLabel")
+                ?.textContent?.trim();
+              const data = child
+                .querySelector(".cl-contentsList_contentDetailListItemData")
+                ?.textContent?.trim();
+              if (!label && data === "詳細") {
+                url = new URL(
+                  child.querySelector("a")?.getAttribute("href") ?? "",
+                  "https://webclass.cdel.uec.ac.jp/webclass/",
+                ).href;
+              } else if (data?.startsWith("利用回数")) {
+                numUsed = parseInt(data.split(" ")[1].trim(), 10);
+              }
+            }
+
+            return {
+              title,
+              url,
+              kind,
+              availableDuring,
+              numUsed,
+            };
+          });
+
+          return {
+            title,
+            contents,
+          };
+        });
+      });
+
+    return {
+      id: courseId,
+      url: page.url(),
+      timeline,
+      sections,
     };
   }
 

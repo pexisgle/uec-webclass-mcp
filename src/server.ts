@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { toStandardJsonSchema } from "@valibot/to-json-schema";
 import * as v from "valibot";
-import session, { timetableSchema } from "./session.ts";
+import session from "./session.ts";
 import { rootLogger } from "./log.ts";
+import { courseSchema, timetableSchema } from "./model.ts";
 
 const server = new McpServer({ name: "uec-webclass-mcp", version: "0.0.0" });
 const serverLogger = rootLogger.getChild("server");
@@ -77,13 +78,57 @@ server.registerTool(
       const timetable = await session.getTimetable(
         "year" in input ? { year: input.year, semester: input.semester } : undefined,
       );
-      serverLogger.info(timetable);
       return {
         structuredContent: timetable,
         content: [
           {
             type: "text",
             text: JSON.stringify(timetable, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      serverLogger.error`Error in get-timetable: ${(error as Error).message}`;
+      return {
+        structuredContent: { error: (error as Error).message },
+        content: [
+          {
+            type: "text",
+            text: `Error: ${(error as Error).message}`,
+          },
+        ],
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "get-course",
+  {
+    description: "Returns the information of a course.",
+    inputSchema: toStandardJsonSchema(
+      v.object({
+        courseId: v.string(),
+      }),
+    ),
+    outputSchema: toStandardJsonSchema(
+      v.union([
+        courseSchema,
+        v.object({
+          error: v.string(),
+        }),
+      ]),
+    ),
+  },
+  async (input) => {
+    try {
+      const course = await session.getCourse(input.courseId);
+      return {
+        structuredContent: course,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(course, null, 2),
           },
         ],
       };
