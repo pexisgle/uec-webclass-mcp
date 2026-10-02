@@ -1,7 +1,7 @@
 import { launchBrowser } from "./browser.ts";
 import { env } from "./env.ts";
 import { TOTP } from "totp-generator";
-import { UnreachableError } from "./utils.ts";
+import { isTargetUrl, UnreachableError } from "./utils.ts";
 import { rootLogger } from "./log.ts";
 import type {
   TimetableTargetOption,
@@ -27,18 +27,20 @@ page.on("load", () => {
 });
 const secret = new URL(env().UEC_TOTP_URL).searchParams.get("secret") as string;
 
+const homeUrl = "https://webclass.cdel.uec.ac.jp/webclass/";
+const ssoIdPassUrl =
+  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e1s2";
+const altSsoIdPassUrl =
+  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e2s1";
+const ssoMfaUrl = "https://shibboleth.cc.uec.ac.jp/fl/saml/mfa/authentication";
+const wcLoginUrl = "https://webclass.cdel.uec.ac.jp/webclass/login.php";
+const loginActionUrls = [wcLoginUrl, ssoIdPassUrl, altSsoIdPassUrl, ssoMfaUrl];
+
 class Session {
   private mutex = new Mutex();
   constructor() {}
   private async login(): Promise<void> {
     sessionLogger.info`Logging in to WebClass...`;
-
-    const homeUrl = "https://webclass.cdel.uec.ac.jp/webclass/";
-    const ssoIdPassUrl =
-      "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e1s2";
-    const ssoMfaUrl = "https://shibboleth.cc.uec.ac.jp/fl/saml/mfa/authentication";
-    const wcLoginUrl = "https://webclass.cdel.uec.ac.jp/webclass/login.php";
-    const actionUrls = [homeUrl, wcLoginUrl, ssoIdPassUrl, ssoMfaUrl];
 
     await page.goto(homeUrl);
 
@@ -46,7 +48,9 @@ class Session {
 
     while (true) {
       await page.waitForURL(
-        (url) => actionUrls.some((actionUrl) => url.href.startsWith(actionUrl)),
+        (url) =>
+          loginActionUrls.some((actionUrl) => isTargetUrl(url.href, actionUrl)) ||
+          isTargetUrl(url.href, homeUrl),
         { timeout: 10000 },
       );
       if (visitedUrls.has(page.url())) {
@@ -62,7 +66,7 @@ class Session {
       } else if (page.url().startsWith(homeUrl)) {
         sessionLogger.info`Login successful!`;
         break;
-      } else if (page.url().startsWith(ssoIdPassUrl)) {
+      } else if (page.url().startsWith(ssoIdPassUrl) || page.url().startsWith(altSsoIdPassUrl)) {
         sessionLogger.info`Filling in username and password for SSO...`;
         await page.fill('input[name="j_username"]', env().UEC_ID);
         await page.fill('input[name="j_password"]', env().UEC_PASSWORD);
@@ -82,10 +86,9 @@ class Session {
 
   async whoami(): Promise<{ name: string; emails: string[] }> {
     using _lock = await this.mutex.lock();
-    await this.login();
 
     sessionLogger.info`Fetching user information...`;
-    await page.goto("https://webclass.cdel.uec.ac.jp/webclass/user.php/config");
+    await this.openPage("https://webclass.cdel.uec.ac.jp/webclass/user.php/config");
     const name = await page.locator("#UserIdTitle + div > p.form-control-static").textContent();
     const emails = await page
       .locator('input[name="email"]')
@@ -94,19 +97,45 @@ class Session {
     return { name: name ?? "", emails };
   }
 
+  private async openPage(url: string): Promise<void> {
+    await this.openPageImpl(0, url);
+  }
+  private async openPageImpl(nest: number, url: string): Promise<void> {
+    sessionLogger.info`Opening page: ${url}`;
+    const res = await page.goto(url);
+    if (!res) {
+      throw new Error(`Failed to open page: ${url}`);
+    }
+    await page.waitForURL(
+      (url) =>
+        loginActionUrls.some((actionUrl) => isTargetUrl(url.href, actionUrl)) ||
+        isTargetUrl(url.href, homeUrl),
+      { timeout: 10000 },
+    );
+    if (!isTargetUrl(page.url(), homeUrl)) {
+      if (nest >= 3) {
+        throw new Error(`Failed to open page after multiple login attempts: ${url}`);
+      }
+      sessionLogger.info`Detected login required. Logging in...`;
+      await this.login();
+      await this.openPageImpl(nest + 1, url);
+    } else {
+      sessionLogger.info`Page opened successfully: ${url}`;
+    }
+  }
+
   async getTimetable(
     target: { year: string; semester: string } | undefined = undefined,
   ): Promise<Timetable> {
     using _lock = await this.mutex.lock();
-    await this.login();
 
     sessionLogger.info`Fetching timetable...`;
     if (target) {
-      await page.goto(
+      await this.openPage(
         `https://webclass.cdel.uec.ac.jp/webclass/index.php?year=${target.year}&semester=${target.semester}`,
       );
     } else {
-      await page.goto("https://webclass.cdel.uec.ac.jp/webclass/");
+      await this.openPage("https://webclass.cdel.uec.ac.jp/webclass/");
     }
 
     const availableYears = await page
@@ -225,15 +254,9 @@ class Session {
 
   async getCourse(courseId: string): Promise<Course> {
     using _lock = await this.mutex.lock();
-    await this.login();
 
     sessionLogger.info`Fetching course information for course ID: ${courseId}...`;
-    const resp = await page.goto(
-      `https://webclass.cdel.uec.ac.jp/webclass/course.php/${courseId}/`,
-    );
-    if (!resp || !resp.ok()) {
-      throw new Error(`Failed to fetch course page for course ID: ${courseId}`);
-    }
+    await this.openPage(`https://webclass.cdel.uec.ac.jp/webclass/course.php/${courseId}/`);
 
     const rawTimeline = await page.evaluate(async (courseId) => {
       return await fetch(

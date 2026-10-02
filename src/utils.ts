@@ -18,3 +18,27 @@ export class UnreachableError extends Error {
     this.name = "UnreachableError";
   }
 }
+
+export function isTargetUrl(currentUrl: string, targetUrl: string): boolean {
+  const current = new URL(currentUrl);
+  const target = new URL(targetUrl);
+
+  if (
+    current.protocol !== target.protocol ||
+    current.hostname !== target.hostname ||
+    current.pathname !== target.pathname
+  ) {
+    return false;
+  }
+
+  const currentParams = new URLSearchParams(current.search);
+  const targetParams = new URLSearchParams(target.search);
+
+  for (const [key, value] of targetParams.entries()) {
+    if (currentParams.get(key) !== value) {
+      return false;
+    }
+  }
+
+  return true;
+}
