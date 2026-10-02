@@ -113,7 +113,7 @@ class Session {
         isTargetUrl(url.href, url.href),
       { timeout: 10000 },
     );
-    if (!isTargetUrl(page.url(), homeUrl)) {
+    if (!isTargetUrl(page.url(), url)) {
       if (nest >= 3) {
         throw new Error(`Failed to open page after multiple login attempts: ${url}`);
       }
