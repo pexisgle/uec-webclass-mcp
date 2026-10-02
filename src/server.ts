@@ -133,7 +133,7 @@ server.registerTool(
         ],
       };
     } catch (error) {
-      serverLogger.error`Error in get-timetable: ${(error as Error).message}`;
+      serverLogger.error`Error in get-course: ${(error as Error).message}`;
       return {
         structuredContent: { error: (error as Error).message },
         content: [

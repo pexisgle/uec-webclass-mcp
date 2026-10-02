@@ -228,7 +228,12 @@ class Session {
     await this.login();
 
     sessionLogger.info`Fetching course information for course ID: ${courseId}...`;
-    await page.goto(`https://webclass.cdel.uec.ac.jp/webclass/course.php/${courseId}/`);
+    const resp = await page.goto(
+      `https://webclass.cdel.uec.ac.jp/webclass/course.php/${courseId}/`,
+    );
+    if (!resp || !resp.ok()) {
+      throw new Error(`Failed to fetch course page for course ID: ${courseId}`);
+    }
 
     const rawTimeline = await page.evaluate(async (courseId) => {
       return await fetch(
