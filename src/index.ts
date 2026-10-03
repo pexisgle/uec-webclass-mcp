@@ -3,6 +3,7 @@ import { createMcpHonoApp } from "@modelcontextprotocol/hono";
 import { Context } from "hono";
 import { serve } from "@hono/node-server";
 import server from "./server.ts";
+import { rootLogger } from "./log.ts";
 
 const handler = createMcpHandler(() => server);
 
@@ -16,6 +17,6 @@ serve(
     port: 3000,
   },
   (info) => {
-    console.log(`Server started on ${info.port}`);
+    rootLogger.info`Server started on ${info.port}`;
   },
 );

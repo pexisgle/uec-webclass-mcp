@@ -30,11 +30,22 @@ const secret = new URL(env().UEC_TOTP_URL).searchParams.get("secret") as string;
 const homeUrl = "https://webclass.cdel.uec.ac.jp/webclass/";
 const ssoIdPassUrl =
   "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e1s2";
-const altSsoIdPassUrl =
+const ssoIdPassUrl2 =
+  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e2s2";
+const ssoJsCheckUrl =
   "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e2s1";
+const ssoJsCheckUrl2 =
+  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e2s4";
 const ssoMfaUrl = "https://shibboleth.cc.uec.ac.jp/fl/saml/mfa/authentication";
 const wcLoginUrl = "https://webclass.cdel.uec.ac.jp/webclass/login.php";
-const loginActionUrls = [wcLoginUrl, ssoIdPassUrl, altSsoIdPassUrl, ssoMfaUrl];
+const loginActionUrls = [
+  wcLoginUrl,
+  ssoIdPassUrl,
+  ssoIdPassUrl2,
+  ssoJsCheckUrl,
+  ssoMfaUrl,
+  ssoJsCheckUrl2,
+];
 
 class Session {
   private mutex = new Mutex();
@@ -54,30 +65,50 @@ class Session {
         { timeout: 10000 },
       );
       if (visitedUrls.has(page.url())) {
-        throw new Error("Loop detected in login flow");
+        throw new Error(`Loop detected in login flow, visited URL: ${page.url()}`);
       }
       visitedUrls.add(page.url());
 
-      if (page.url().startsWith(wcLoginUrl)) {
+      if (isTargetUrl(page.url(), wcLoginUrl)) {
         sessionLogger.info`Filling in username and password for WebClass...`;
-        await page.fill("#username", env().UEC_ID);
-        await page.fill("#password", env().UEC_PASSWORD);
-        await page.click('input[type="submit"]');
-      } else if (page.url().startsWith(homeUrl)) {
+        const currentUrl = page.url();
+        await page.locator("#username").fill(env().UEC_ID);
+        await page.locator("#password").fill(env().UEC_PASSWORD);
+        await page.locator('input[name="login"]').dispatchEvent("click");
+        await page.waitForURL((url) => url.href !== currentUrl, { timeout: 10000 });
+      } else if (isTargetUrl(page.url(), homeUrl)) {
         sessionLogger.info`Login successful!`;
         break;
-      } else if (page.url().startsWith(ssoIdPassUrl) || page.url().startsWith(altSsoIdPassUrl)) {
+      } else if (
+        isTargetUrl(page.url(), ssoJsCheckUrl) ||
+        isTargetUrl(page.url(), ssoJsCheckUrl2)
+      ) {
+        sessionLogger.info`Manually processing SSO JavaScript check...`;
+        // ref: https://github.com/lightpanda-io/browser/issues/3734
+        const currentUrl = page.url();
+        await page.evaluate(() => {
+          const form1 = document.forms.namedItem("form1") as any;
+          for (const element of form1.querySelectorAll("input")) {
+            form1[element.name] = element;
+          }
+          // @ts-expect-error document[formのname]はHTMLの仕様に存在する
+          document.form1 = form1;
+
+          // @ts-expect-error ログイン画面にwindow.doLoad()あるいはwindow.doSave()が存在する
+          (window.doLoad || window.doSave)();
+        });
+        await page.waitForURL((url) => url.href !== currentUrl, { timeout: 10000 });
+      } else if (isTargetUrl(page.url(), ssoIdPassUrl) || isTargetUrl(page.url(), ssoIdPassUrl2)) {
         sessionLogger.info`Filling in username and password for SSO...`;
-        await page.fill('input[name="j_username"]', env().UEC_ID);
-        await page.fill('input[name="j_password"]', env().UEC_PASSWORD);
-        await page.click('button[name="_eventId_proceed"]');
-      } else if (page.url().startsWith(ssoMfaUrl)) {
+        await page.locator('input[name="j_username"]').fill(env().UEC_ID);
+        await page.locator('input[name="j_password"]').fill(env().UEC_PASSWORD);
+        await page.locator('button[name="_eventId_proceed"]').click();
+      } else if (isTargetUrl(page.url(), ssoMfaUrl)) {
         sessionLogger.info`Filling in TOTP for SSO...`;
-        await page.fill(
-          'input[id="frm-authcode"]',
-          await TOTP.generate(secret).then((otp) => otp.otp),
-        );
-        await page.click('input[type="submit"]');
+        await page
+          .locator('input[id="frm-authcode"]')
+          .fill(await TOTP.generate(secret).then((otp) => otp.otp));
+        await page.locator('input[name="login"]').click();
       } else {
         throw new UnreachableError(`Unexpected URL: ${page.url()}`);
       }

@@ -1,7 +1,7 @@
 {
   "type": "module",
   "scripts": {
-    "browser:install": "playwright-core install chromium",
+    "browser:install": "lightpanda install",
     "start": "node --env-file .env src/index.ts",
     "inspect": "mcp-inspector --server-url http://localhost:3000/mcp"
   },
