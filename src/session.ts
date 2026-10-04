@@ -28,24 +28,23 @@ page.on("load", () => {
 const secret = new URL(env().UEC_TOTP_URL).searchParams.get("secret") as string;
 
 const homeUrl = "https://webclass.cdel.uec.ac.jp/webclass/";
-const ssoIdPassUrl =
-  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e1s2";
-const ssoIdPassUrl2 =
-  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e2s2";
-const ssoJsCheckUrl =
-  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e2s1";
-const ssoJsCheckUrl2 =
-  "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO?execution=e2s4";
+const ssoUrl = "https://shibboleth.cc.uec.ac.jp/idp/profile/SAML2/Redirect/SSO";
 const ssoMfaUrl = "https://shibboleth.cc.uec.ac.jp/fl/saml/mfa/authentication";
 const wcLoginUrl = "https://webclass.cdel.uec.ac.jp/webclass/login.php";
-const loginActionUrls = [
-  wcLoginUrl,
-  ssoIdPassUrl,
-  ssoIdPassUrl2,
-  ssoJsCheckUrl,
-  ssoMfaUrl,
-  ssoJsCheckUrl2,
-];
+const loginActionUrls = [wcLoginUrl, ssoMfaUrl];
+
+function isSsoStep(url: string, steps: number[]): boolean {
+  if (!isTargetUrl(url, ssoUrl)) return false;
+  const match = new URL(url).searchParams.get("execution")?.match(/^e\d+s([124])$/);
+  return match != null && steps.includes(Number(match[1]));
+}
+
+function isLoginActionUrl(url: string): boolean {
+  return (
+    loginActionUrls.some((actionUrl) => isTargetUrl(url, actionUrl)) ||
+    isSsoStep(url, [1, 2, 4])
+  );
+}
 
 class Session {
   private mutex = new Mutex();
@@ -60,7 +59,7 @@ class Session {
     while (true) {
       await page.waitForURL(
         (url) =>
-          loginActionUrls.some((actionUrl) => isTargetUrl(url.href, actionUrl)) ||
+          isLoginActionUrl(url.href) ||
           isTargetUrl(url.href, homeUrl),
         { timeout: 10000 },
       );
@@ -79,10 +78,7 @@ class Session {
       } else if (isTargetUrl(page.url(), homeUrl)) {
         sessionLogger.info`Login successful!`;
         break;
-      } else if (
-        isTargetUrl(page.url(), ssoJsCheckUrl) ||
-        isTargetUrl(page.url(), ssoJsCheckUrl2)
-      ) {
+      } else if (isSsoStep(page.url(), [1, 4])) {
         sessionLogger.info`Manually processing SSO JavaScript check...`;
         // ref: https://github.com/lightpanda-io/browser/issues/3734
         const currentUrl = page.url();
@@ -98,7 +94,7 @@ class Session {
           (window.doLoad || window.doSave)();
         });
         await page.waitForURL((url) => url.href !== currentUrl, { timeout: 10000 });
-      } else if (isTargetUrl(page.url(), ssoIdPassUrl) || isTargetUrl(page.url(), ssoIdPassUrl2)) {
+      } else if (isSsoStep(page.url(), [2])) {
         sessionLogger.info`Filling in username and password for SSO...`;
         await page.locator('input[name="j_username"]').fill(env().UEC_ID);
         await page.locator('input[name="j_password"]').fill(env().UEC_PASSWORD);
@@ -139,7 +135,7 @@ class Session {
     }
     await page.waitForURL(
       (url) =>
-        loginActionUrls.some((actionUrl) => isTargetUrl(url.href, actionUrl)) ||
+        isLoginActionUrl(url.href) ||
         isTargetUrl(url.href, homeUrl) ||
         isTargetUrl(url.href, url.href),
       { timeout: 10000 },
