@@ -25,6 +25,15 @@ const page = await context.newPage();
 page.on("load", () => {
   sessionLogger.info`Page loaded: ${page.url()}`;
 });
+const consoleLogger = rootLogger.getChild("console");
+page.on("console", (msg) => {
+  if (msg.type() === "error") {
+    consoleLogger.error`${msg.text()}`;
+  } else {
+    consoleLogger.info`${msg.text()}`;
+  }
+});
+
 const secret = new URL(env().UEC_TOTP_URL).searchParams.get("secret") as string;
 
 const homeUrl = "https://webclass.cdel.uec.ac.jp/webclass/";
@@ -40,10 +49,7 @@ function isSsoStep(url: string, steps: number[]): boolean {
 }
 
 function isLoginActionUrl(url: string): boolean {
-  return (
-    loginActionUrls.some((actionUrl) => isTargetUrl(url, actionUrl)) ||
-    isSsoStep(url, [1, 2, 4])
-  );
+  return loginActionUrls.some((actionUrl) => isTargetUrl(url, actionUrl)) || isSsoStep(url, [2]);
 }
 
 class Session {
@@ -57,12 +63,9 @@ class Session {
     const visitedUrls = new Set<string>();
 
     while (true) {
-      await page.waitForURL(
-        (url) =>
-          isLoginActionUrl(url.href) ||
-          isTargetUrl(url.href, homeUrl),
-        { timeout: 10000 },
-      );
+      await page.waitForURL((url) => isLoginActionUrl(url.href) || isTargetUrl(url.href, homeUrl), {
+        timeout: 10000,
+      });
       if (visitedUrls.has(page.url())) {
         throw new Error(`Loop detected in login flow, visited URL: ${page.url()}`);
       }
@@ -78,22 +81,6 @@ class Session {
       } else if (isTargetUrl(page.url(), homeUrl)) {
         sessionLogger.info`Login successful!`;
         break;
-      } else if (isSsoStep(page.url(), [1, 4])) {
-        sessionLogger.info`Manually processing SSO JavaScript check...`;
-        // ref: https://github.com/lightpanda-io/browser/issues/3734
-        const currentUrl = page.url();
-        await page.evaluate(() => {
-          const form1 = document.forms.namedItem("form1") as any;
-          for (const element of form1.querySelectorAll("input")) {
-            form1[element.name] = element;
-          }
-          // @ts-expect-error document[formのname]はHTMLの仕様に存在する
-          document.form1 = form1;
-
-          // @ts-expect-error ログイン画面にwindow.doLoad()あるいはwindow.doSave()が存在する
-          (window.doLoad || window.doSave)();
-        });
-        await page.waitForURL((url) => url.href !== currentUrl, { timeout: 10000 });
       } else if (isSsoStep(page.url(), [2])) {
         sessionLogger.info`Filling in username and password for SSO...`;
         await page.locator('input[name="j_username"]').fill(env().UEC_ID);
